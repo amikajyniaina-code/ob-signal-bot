@@ -542,10 +542,12 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 # LANCEMENT DU BOT
 # ─────────────────────────────────────────────
-def main():
-    app = Application.builder().token(TOKEN).build()
+async def post_init(app):
+    asyncio.create_task(surveillance(app))
 
-    # Conversation pour ajouter une zone
+def main():
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
+
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(new_zone, pattern="^new_zone$")],
         states={
@@ -563,15 +565,11 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(list_zones,          pattern="^list_zones$"))
-    app.add_handler(CallbackQueryHandler(delete_zone_menu,    pattern="^delete_zone$"))
-    app.add_handler(CallbackQueryHandler(delete_zone_confirm, pattern="^del_"))
-    app.add_handler(CallbackQueryHandler(back_start,          pattern="^back_start$"))
+    app.add_handler(CallbackQueryHandler(list_zones,            pattern="^list_zones$"))
+    app.add_handler(CallbackQueryHandler(delete_zone_menu,      pattern="^delete_zone$"))
+    app.add_handler(CallbackQueryHandler(delete_zone_confirm,   pattern="^del_"))
+    app.add_handler(CallbackQueryHandler(back_start,            pattern="^back_start$"))
     app.add_handler(CallbackQueryHandler(handle_trade_response, pattern="^(enter|skip)_"))
-
-    # Lancer la surveillance en arrière-plan
-    loop = asyncio.get_event_loop()
-    loop.create_task(surveillance(app))
 
     print("🤖 Bot démarré !")
     app.run_polling()
