@@ -1,0 +1,59 @@
+# 🤖 GUIDE INSTALLATION BOT OB SIGNAL
+
+## ÉTAPE 1 — Créer ton Bot Telegram (5 min)
+
+1. Ouvre Telegram sur ton téléphone
+2. Cherche **@BotFather** et clique dessus
+3. Envoie le message : /newbot
+4. Donne un nom : exemple **Mon Bot OB**
+5. Donne un username : exemple **monbotob_bot** (doit finir par _bot)
+6. BotFather te donne un TOKEN → **COPIE-LE** (ressemble à : 123456789:AAFxxxxxxx)
+
+## ÉTAPE 2 — Récupérer ton Chat ID (2 min)
+
+1. Cherche **@userinfobot** sur Telegram
+2. Envoie n'importe quel message
+3. Il te répond avec ton **Id** → **COPIE-LE** (ex: 123456789)
+
+## ÉTAPE 3 — Mettre le bot sur Railway (10 min)
+
+1. Va sur **railway.app** et crée un compte gratuit (avec GitHub)
+2. Crée un nouveau projet → **Deploy from GitHub**
+3. Upload les 3 fichiers : bot.py, requirements.txt, Procfile
+4. Dans Railway, va dans **Variables** et ajoute :
+   - TELEGRAM_TOKEN = (ton token de l'étape 1)
+   - TELEGRAM_CHAT_ID = (ton chat id de l'étape 2)
+5. Clique sur **Deploy** → le bot démarre !
+
+## ÉTAPE 4 — Utiliser le bot
+
+1. Ouvre Telegram → cherche ton bot → /start
+2. Clique ➕ Nouvelle Zone OB
+3. Choisis ta paire, direction, timeframe
+4. Entre le prix HAUT et BAS de ta zone
+5. Le bot surveille 24h/24 et te notifie quand les conditions sont réunies !
+
+## COMMANDES DISPONIBLES
+
+- /start → Menu principal
+- Bouton ➕ → Ajouter une zone OB
+- Bouton 📋 → Voir tes zones actives
+- Bouton ❌ → Supprimer une zone
+
+## EXEMPLE DE SIGNAL REÇU
+
+🟢 SIGNAL BUY — EURUSD — OB H4
+━━━━━━━━━━━━━━━━━━
+Analyse Timeframes :
+  H1:  RSI✅ MA10✅ Ichi❌ → ✅ VALIDÉ
+  M30: RSI✅ MA10❌ Ichi✅ → ✅ VALIDÉ
+  M15: RSI❌ MA10❌ Ichi✅ → ❌
+━━━━━━━━━━━━━━━━━━
+🔍 Chasse au SL  : ✅ Détectée
+📦 Inside Bar    : ✅ Présente
+📊 Divergence    : ✅ Convergence
+━━━━━━━━━━━━━━━━━━
+💰 Prix actuel   : 1.08542
+⚠️ Place ton SL et TP manuellement
+
+[✅ J'entre]  [❌ Je passe]
