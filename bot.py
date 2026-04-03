@@ -1,4 +1,4 @@
-import os, json, asyncio, logging
+import os, json, logging
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -14,15 +14,21 @@ CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID")
 ZONES_FILE    = "zones.json"
 NOTIFIED_FILE = "notified.json"
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 PAIR, DIRECTION, TIMEFRAME, PRICE_HIGH, PRICE_LOW = range(5)
 
 # ─── ZONES ───────────────────────────────────
 def load_zones():
-    if os.path.exists(ZONES_FILE):
-        with open(ZONES_FILE) as f:
-            return json.load(f)
+    try:
+        if os.path.exists(ZONES_FILE):
+            with open(ZONES_FILE) as f:
+                return json.load(f)
+    except:
+        pass
     return []
 
 def save_zones(z):
@@ -30,9 +36,12 @@ def save_zones(z):
         json.dump(z, f, indent=2)
 
 def load_notified():
-    if os.path.exists(NOTIFIED_FILE):
-        with open(NOTIFIED_FILE) as f:
-            return json.load(f)
+    try:
+        if os.path.exists(NOTIFIED_FILE):
+            with open(NOTIFIED_FILE) as f:
+                return json.load(f)
+    except:
+        pass
     return {}
 
 def save_notified(n):
@@ -54,12 +63,12 @@ def get_ticker(pair):
 
 # ─── DONNÉES ─────────────────────────────────
 TF_MAP = {
-    "H4": ("1h",  "60d"),
-    "H1": ("60m", "30d"),
-    "M30":("30m", "10d"),
-    "M15":("15m", "5d"),
-    "M5": ("5m",  "2d"),
-    "M1": ("1m",  "1d"),
+    "H4":  ("1h",  "60d"),
+    "H1":  ("60m", "30d"),
+    "M30": ("30m", "10d"),
+    "M15": ("15m", "5d"),
+    "M5":  ("5m",  "2d"),
+    "M1":  ("1m",  "1d"),
 }
 SUB_TFS = {
     "H4":  ["H1",  "M30", "M15"],
@@ -70,30 +79,44 @@ SUB_TFS = {
 def get_data(pair, tf):
     try:
         interval, period = TF_MAP[tf]
-        df = yf.download(get_ticker(pair), interval=interval,
-                         period=period, progress=False, auto_adjust=True)
+        df = yf.download(
+            get_ticker(pair), interval=interval,
+            period=period, progress=False, auto_adjust=True
+        )
+        if df is None or df.empty:
+            return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
-        if df.empty or len(df) < 30:
-            return None
+        df = df.dropna()
         if tf == "H4":
-            df = df.resample("4h").agg(
-                {"Open":"first","High":"max","Low":"min",
-                 "Close":"last","Volume":"sum"}).dropna()
-        return df.dropna()
+            df = df.resample("4h").agg({
+                "Open":"first","High":"max",
+                "Low":"min","Close":"last","Volume":"sum"
+            }).dropna()
+        if len(df) < 20:
+            return None
+        return df
     except Exception as e:
-        logging.warning(f"Data error {pair} {tf}: {e}")
+        logging.warning(f"get_data error {pair} {tf}: {e}")
         return None
 
 def get_price(pair):
-    try:
-        df = yf.download(get_ticker(pair), interval="1m",
-                         period="1d", progress=False, auto_adjust=True)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-        return float(df["Close"].iloc[-1]) if not df.empty else None
-    except:
-        return None
+    # Essaie 1m d'abord, puis 5m si vide
+    for interval, period in [("1m","1d"), ("5m","2d")]:
+        try:
+            df = yf.download(
+                get_ticker(pair), interval=interval,
+                period=period, progress=False, auto_adjust=True
+            )
+            if df is None or df.empty:
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            if not df.empty:
+                return float(df["Close"].iloc[-1])
+        except:
+            continue
+    return None
 
 # ─── INDICATEURS ─────────────────────────────
 def calc_rsi(closes, period=14):
@@ -101,34 +124,37 @@ def calc_rsi(closes, period=14):
     gain  = delta.clip(lower=0).ewm(alpha=1/period, adjust=False).mean()
     loss  = (-delta.clip(upper=0)).ewm(alpha=1/period, adjust=False).mean()
     rs    = gain / (loss + 1e-10)
-    return float((100 - (100 / (1 + rs))).iloc[-1])
+    rsi   = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1])
 
 def rsi_signal(val):
-    if val < 30:   return 1    # BUY survente
-    if val <= 50:  return -1   # SELL
-    if val <= 70:  return 1    # BUY
-    return -1                  # SELL surachat
+    if val < 30:   return 1   # BUY survente
+    if val <= 50:  return -1  # SELL
+    if val <= 70:  return 1   # BUY
+    return -1                 # SELL surachat
 
 def ma10_signal(open_p, close_p, ma):
     body_top = max(open_p, close_p)
     body_bot = min(open_p, close_p)
-    if body_bot > ma:  return 1    # corps au dessus → BUY
-    if body_top < ma:  return -1   # corps en dessous → SELL
-    return 0                       # corps touche → NEUTRE
+    if body_bot > ma:  return 1   # corps au dessus → BUY
+    if body_top < ma:  return -1  # corps en dessous → SELL
+    return 0                      # corps touche → NEUTRE
 
 def ich_signal(df):
     try:
-        hi  = df["High"]
-        lo  = df["Low"]
-        cl  = df["Close"]
-        t   = (hi.rolling(9).max()  + lo.rolling(9).min())  / 2
-        k   = (hi.rolling(26).max() + lo.rolling(26).min()) / 2
-        sa  = ((t + k) / 2).shift(26)
-        sb  = ((hi.rolling(52).max() + lo.rolling(52).min()) / 2).shift(26)
-        if len(sa.dropna()) == 0 or len(sb.dropna()) == 0:
+        hi = df["High"]
+        lo = df["Low"]
+        cl = df["Close"]
+        t  = (hi.rolling(9).max()  + lo.rolling(9).min())  / 2
+        k  = (hi.rolling(26).max() + lo.rolling(26).min()) / 2
+        sa = ((t + k) / 2).shift(26)
+        sb = ((hi.rolling(52).max() + lo.rolling(52).min()) / 2).shift(26)
+        sa_val = sa.dropna()
+        sb_val = sb.dropna()
+        if sa_val.empty or sb_val.empty:
             return 0
-        top = max(float(sa.iloc[-1]), float(sb.iloc[-1]))
-        bot = min(float(sa.iloc[-1]), float(sb.iloc[-1]))
+        top = max(float(sa_val.iloc[-1]), float(sb_val.iloc[-1]))
+        bot = min(float(sa_val.iloc[-1]), float(sb_val.iloc[-1]))
         c   = float(cl.iloc[-1])
         if c > top:  return 1
         if c < bot:  return -1
@@ -138,29 +164,33 @@ def ich_signal(df):
 
 def get_indicators(pair, tf):
     df = get_data(pair, tf)
-    if df is None or len(df) < 30:
-        logging.warning(f"Pas assez de données {pair} {tf}")
+    if df is None:
+        logging.warning(f"Pas de données {pair} {tf}")
         return None
     try:
-        rsi = rsi_signal(calc_rsi(df["Close"]))
-        ma  = ma10_signal(
+        rsi_val = calc_rsi(df["Close"])
+        rsi     = rsi_signal(rsi_val)
+        ma_val  = float(df["Close"].rolling(10).mean().iloc[-1])
+        ma      = ma10_signal(
             float(df["Open"].iloc[-1]),
             float(df["Close"].iloc[-1]),
-            float(df["Close"].rolling(10).mean().iloc[-1])
+            ma_val
         )
         ich = ich_signal(df)
-        logging.info(f"{pair} {tf} → RSI:{rsi} MA:{ma} ICH:{ich}")
-        return {"rsi": rsi, "ma": ma, "ich": ich}
+        logging.info(f"{pair} {tf} → RSI:{rsi_val:.1f}({rsi}) MA:{ma} ICH:{ich}")
+        return {"rsi": rsi, "ma": ma, "ich": ich, "rsi_val": rsi_val}
     except Exception as e:
-        logging.warning(f"Indicator error {pair} {tf}: {e}")
+        logging.warning(f"get_indicators error {pair} {tf}: {e}")
         return None
 
 # ─── DÉTECTIONS SUPPLÉMENTAIRES ──────────────
 def detect_inside_bar(pair, tf):
     df = get_data(pair, tf)
     if df is None or len(df) < 2: return False
-    return bool(df["High"].iloc[-1] < df["High"].iloc[-2] and
-                df["Low"].iloc[-1]  > df["Low"].iloc[-2])
+    return bool(
+        float(df["High"].iloc[-1]) < float(df["High"].iloc[-2]) and
+        float(df["Low"].iloc[-1])  > float(df["Low"].iloc[-2])
+    )
 
 def detect_sl_hunt(pair, tf):
     df = get_data(pair, tf)
@@ -188,14 +218,16 @@ def analyze_zone(zone):
 
     price = get_price(pair)
     if price is None:
-        logging.warning(f"Prix indisponible pour {pair}")
+        logging.warning(f"Prix indisponible {pair}")
         return None
 
-    logging.info(f"Prix {pair}: {price} | Zone: {low} - {high}")
+    logging.info(f"Prix {pair}: {price:.5f} | Zone: {low} - {high}")
 
     if not (low <= price <= high):
-        logging.info(f"{pair} hors zone")
+        logging.info(f"{pair} hors zone ({price:.5f} pas entre {low} et {high})")
         return None
+
+    logging.info(f"✅ {pair} DANS la zone ! Analyse en cours...")
 
     sub_tfs   = SUB_TFS.get(ob_tf, ["M30", "M15", "M5"])
     dv        = 1 if direction == "BUY" else -1
@@ -208,33 +240,29 @@ def analyze_zone(zone):
             results[tf] = None
             continue
 
-        # Score: on compte RSI et MA (Ichimoku neutre = ignoré)
         score = 0
-        total = 0
-
-        if ind["rsi"] != 0:
-            total += 1
-            if ind["rsi"] == dv: score += 1
-
+        # RSI toujours compté
+        if ind["rsi"] == dv: score += 1
+        # MA toujours compté sauf si neutre
         if ind["ma"] != 0:
-            total += 1
             if ind["ma"] == dv: score += 1
-
+        # Ichimoku compté sauf si neutre
         if ind["ich"] != 0:
-            total += 1
             if ind["ich"] == dv: score += 1
 
-        # 2/3 confirmés OU si Ichimoku neutre → 2/2 sur RSI+MA suffisent
         ok = (score >= 2)
         if ok: confirmed += 1
 
-        results[tf] = {**ind, "confirmed": ok, "score": score, "total": total}
-        logging.info(f"{tf}: score={score}/{total} confirmed={ok}")
+        results[tf] = {**ind, "confirmed": ok, "score": score}
+        logging.info(f"  {tf}: score={score} ok={ok}")
 
-    logging.info(f"Timeframes confirmés: {confirmed}/3")
+    logging.info(f"Total confirmés: {confirmed}/3 (besoin 2)")
 
     if confirmed < 2:
+        logging.info(f"❌ Signal insuffisant pour {pair} {direction}")
         return None
+
+    logging.info(f"🚀 SIGNAL {direction} validé pour {pair}!")
 
     return {
         "pair":       pair,
@@ -251,27 +279,25 @@ def analyze_zone(zone):
 def format_signal(sig):
     emoji = "🟢" if sig["direction"] == "BUY" else "🔴"
     dv    = 1 if sig["direction"] == "BUY" else -1
-
     lines = [
         f"{emoji} *SIGNAL {sig['direction']} — {sig['pair']} — OB {sig['ob_tf']}*",
         "━━━━━━━━━━━━━━━━━━",
         "*Analyse Timeframes :*",
     ]
-
     for tf, r in sig["results"].items():
         if r is None:
             lines.append(f"  {tf}: ❓ Données indisponibles")
             continue
-        rsi_e = "✅" if r["rsi"] == dv else ("⚪" if r["rsi"] == 0 else "❌")
-        ma_e  = "✅" if r["ma"]  == dv else ("⚪" if r["ma"]  == 0 else "❌")
+        rsi_e = "✅" if r["rsi"] == dv else "❌"
+        ma_e  = "✅" if r["ma"]  == dv else ("⚪" if r["ma"] == 0 else "❌")
         ich_e = "✅" if r["ich"] == dv else ("⚪" if r["ich"] == 0 else "❌")
         ok_e  = "✅ VALIDÉ" if r["confirmed"] else "❌"
-        lines.append(f"  {tf}: RSI{rsi_e} MA{ma_e} Ichi{ich_e} → {ok_e}")
-
+        rsi_v = f"{r.get('rsi_val',0):.1f}"
+        lines.append(f"  {tf}: RSI{rsi_e}({rsi_v}) MA{ma_e} Ichi{ich_e} → {ok_e}")
     lines += [
         "━━━━━━━━━━━━━━━━━━",
-        f"🔍 Chasse au SL  : {'✅ Détectée' if sig['sl_hunt']    else '❌ Absente'}",
-        f"📦 Inside Bar    : {'✅ Présente' if sig['inside_bar'] else '❌ Absente'}",
+        f"🔍 Chasse au SL  : {'✅ Détectée'   if sig['sl_hunt']    else '❌ Absente'}",
+        f"📦 Inside Bar    : {'✅ Présente'   if sig['inside_bar'] else '❌ Absente'}",
         f"📊 Divergence    : {'⚠️ Divergence' if sig['divergence'] else '✅ Convergence'}",
         "━━━━━━━━━━━━━━━━━━",
         f"💰 Prix actuel   : `{sig['price']:.5f}`",
@@ -279,54 +305,45 @@ def format_signal(sig):
     ]
     return "\n".join(lines)
 
-# ─── SURVEILLANCE ────────────────────────────
-async def surveillance(app):
-    await asyncio.sleep(5)
-    logging.info("✅ Surveillance démarrée")
-    while True:
+# ─── SURVEILLANCE (job_queue) ─────────────────
+async def surveillance_job(context: ContextTypes.DEFAULT_TYPE):
+    zones    = load_zones()
+    notified = load_notified()
+    logging.info(f"🔍 Vérification {len(zones)} zone(s)...")
+
+    for zone in zones:
+        zid = zone.get("id", "")
         try:
-            zones    = load_zones()
-            notified = load_notified()
-            logging.info(f"Vérification de {len(zones)} zone(s)...")
-
-            for zone in zones:
-                zid = zone.get("id", "")
-                try:
-                    sig = analyze_zone(zone)
-                    if sig:
-                        if notified.get(zid):
-                            continue
-                        msg = format_signal(sig)
-                        keyboard = [[
-                            InlineKeyboardButton("✅ J'entre",  callback_data=f"enter_{zid}"),
-                            InlineKeyboardButton("❌ Je passe", callback_data=f"skip_{zid}"),
-                        ]]
-                        await app.bot.send_message(
-                            chat_id=CHAT_ID, text=msg,
-                            parse_mode="Markdown",
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
-                        notified[zid] = True
+            sig = analyze_zone(zone)
+            if sig:
+                if notified.get(zid):
+                    continue
+                msg      = format_signal(sig)
+                keyboard = [[
+                    InlineKeyboardButton("✅ J'entre",  callback_data=f"enter_{zid}"),
+                    InlineKeyboardButton("❌ Je passe", callback_data=f"skip_{zid}"),
+                ]]
+                await context.bot.send_message(
+                    chat_id=CHAT_ID, text=msg,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                notified[zid] = True
+                save_notified(notified)
+            else:
+                price = get_price(zone["pair"])
+                if price and not (float(zone["low"]) <= price <= float(zone["high"])):
+                    if notified.get(zid):
+                        notified.pop(zid, None)
                         save_notified(notified)
-                    else:
-                        price = get_price(zone["pair"])
-                        if price and not (float(zone["low"]) <= price <= float(zone["high"])):
-                            if notified.get(zid):
-                                notified.pop(zid, None)
-                                save_notified(notified)
-                except Exception as e:
-                    logging.error(f"Erreur zone {zid}: {e}")
-
         except Exception as e:
-            logging.error(f"Erreur surveillance: {e}")
-
-        await asyncio.sleep(60)
+            logging.error(f"Erreur zone {zid}: {e}")
 
 # ─── HANDLERS TELEGRAM ───────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
-        [InlineKeyboardButton("➕ Nouvelle Zone OB",  callback_data="new_zone")],
-        [InlineKeyboardButton("📋 Mes zones actives", callback_data="list_zones")],
+        [InlineKeyboardButton("➕ Nouvelle Zone OB",   callback_data="new_zone")],
+        [InlineKeyboardButton("📋 Mes zones actives",  callback_data="list_zones")],
         [InlineKeyboardButton("❌ Supprimer une zone", callback_data="delete_zone")],
     ]
     await update.message.reply_text(
@@ -348,9 +365,10 @@ async def new_zone(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("ETHUSD", callback_data="pair_ETHUSD")],
         [InlineKeyboardButton("Autre ✏️", callback_data="pair_OTHER")],
     ]
-    await query.edit_message_text("📊 *Quelle paire ?*",
-                                  reply_markup=InlineKeyboardMarkup(kb),
-                                  parse_mode="Markdown")
+    await query.edit_message_text(
+        "📊 *Quelle paire ?*",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
+    )
     return PAIR
 
 async def set_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -366,9 +384,10 @@ async def set_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🟢 BUY",  callback_data="dir_BUY"),
         InlineKeyboardButton("🔴 SELL", callback_data="dir_SELL"),
     ]]
-    await query.edit_message_text(f"✅ Paire : *{pair}*\n\nDirection ?",
-                                  reply_markup=InlineKeyboardMarkup(kb),
-                                  parse_mode="Markdown")
+    await query.edit_message_text(
+        f"✅ Paire : *{pair}*\n\nDirection ?",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
+    )
     return DIRECTION
 
 async def set_pair_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -451,7 +470,8 @@ async def set_price_low(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ *Zone enregistrée !*\n\n"
         f"{emoji} *{zone['pair']}* — {zone['direction']} — OB {zone['timeframe']}\n"
-        f"Haut : `{high}` | Bas : `{low}`\n\n🟢 Surveillance active 24h/24",
+        f"Haut : `{high}` | Bas : `{low}`\n\n"
+        f"🟢 Surveillance active 24h/24",
         parse_mode="Markdown"
     )
     context.user_data.clear()
@@ -473,11 +493,11 @@ async def list_zones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, z in enumerate(zones, 1):
         e = "🟢" if z["direction"] == "BUY" else "🔴"
         lines.append(
-            f"{i}. {e} *{z['pair']}* — {z['direction']} — {z['timeframe']}\n"
-            f"   Haut: `{z['high']}` | Bas: `{z['low']}`\n"
+            f"{i}\\. {e} *{z['pair']}* — {z['direction']} — {z['timeframe']}\n"
+            f"   Haut: `{z['high']}` \\| Bas: `{z['low']}`\n"
             f"   Créée: {z.get('created','—')}"
         )
-    await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
+    await query.edit_message_text("\n".join(lines), parse_mode="MarkdownV2")
 
 async def delete_zone_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -492,9 +512,10 @@ async def delete_zone_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label = f"{e} {z['pair']} {z['direction']} {z['timeframe']}"
         kb.append([InlineKeyboardButton(label, callback_data=f"del_{z['id']}")])
     kb.append([InlineKeyboardButton("🔙 Retour", callback_data="back_start")])
-    await query.edit_message_text("❌ *Quelle zone supprimer ?*",
-                                  reply_markup=InlineKeyboardMarkup(kb),
-                                  parse_mode="Markdown")
+    await query.edit_message_text(
+        "❌ *Quelle zone supprimer ?*",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
+    )
 
 async def delete_zone_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -521,28 +542,28 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     kb = [
-        [InlineKeyboardButton("➕ Nouvelle Zone OB",  callback_data="new_zone")],
-        [InlineKeyboardButton("📋 Mes zones actives", callback_data="list_zones")],
+        [InlineKeyboardButton("➕ Nouvelle Zone OB",   callback_data="new_zone")],
+        [InlineKeyboardButton("📋 Mes zones actives",  callback_data="list_zones")],
         [InlineKeyboardButton("❌ Supprimer une zone", callback_data="delete_zone")],
     ]
-    await query.edit_message_text("🤖 *Bot OB Signal*\nQue veux-tu faire ?",
-                                  reply_markup=InlineKeyboardMarkup(kb),
-                                  parse_mode="Markdown")
+    await query.edit_message_text(
+        "🤖 *Bot OB Signal*\nQue veux-tu faire ?",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
+    )
 
 # ─── MAIN ────────────────────────────────────
-async def post_init(app):
-    asyncio.create_task(surveillance(app))
-
 def main():
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app = Application.builder().token(TOKEN).build()
 
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(new_zone, pattern="^new_zone$")],
         states={
-            PAIR:       [CallbackQueryHandler(set_pair, pattern="^pair_"),
-                         MessageHandler(filters.TEXT & ~filters.COMMAND, set_pair_custom)],
-            DIRECTION:  [CallbackQueryHandler(set_direction, pattern="^dir_")],
-            TIMEFRAME:  [CallbackQueryHandler(set_timeframe, pattern="^tf_")],
+            PAIR:       [
+                CallbackQueryHandler(set_pair, pattern="^pair_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, set_pair_custom),
+            ],
+            DIRECTION:  [CallbackQueryHandler(set_direction,  pattern="^dir_")],
+            TIMEFRAME:  [CallbackQueryHandler(set_timeframe,  pattern="^tf_")],
             PRICE_HIGH: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_price_high)],
             PRICE_LOW:  [MessageHandler(filters.TEXT & ~filters.COMMAND, set_price_low)],
         },
@@ -551,14 +572,18 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(list_zones,         pattern="^list_zones$"))
-    app.add_handler(CallbackQueryHandler(delete_zone_menu,   pattern="^delete_zone$"))
-    app.add_handler(CallbackQueryHandler(delete_zone_confirm,pattern="^del_"))
-    app.add_handler(CallbackQueryHandler(back_start,         pattern="^back_start$"))
-    app.add_handler(CallbackQueryHandler(handle_trade,       pattern="^(enter|skip)_"))
+    app.add_handler(CallbackQueryHandler(list_zones,          pattern="^list_zones$"))
+    app.add_handler(CallbackQueryHandler(delete_zone_menu,    pattern="^delete_zone$"))
+    app.add_handler(CallbackQueryHandler(delete_zone_confirm, pattern="^del_"))
+    app.add_handler(CallbackQueryHandler(back_start,          pattern="^back_start$"))
+    app.add_handler(CallbackQueryHandler(handle_trade,        pattern="^(enter|skip)_"))
+
+    # Job queue — vérifie toutes les 60 secondes
+    app.job_queue.run_repeating(surveillance_job, interval=60, first=10)
 
     print("🤖 Bot OB Signal démarré !")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
