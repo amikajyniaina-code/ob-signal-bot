@@ -54,7 +54,12 @@ FOREX_TF = {
 
 # ─── BINANCE DATA ────────────────────────────
 def binance_symbol(pair):
-    return pair.upper().replace("USD","USDT")
+    pair = pair.upper()
+    # Si déjà en USDT
+    if pair.endswith("USDT"): return pair
+    # BTCUSD → BTCUSDT
+    if pair.endswith("USD"): return pair[:-3] + "USDT"
+    return pair + "USDT"
 
 def get_binance_price(pair):
     try:
